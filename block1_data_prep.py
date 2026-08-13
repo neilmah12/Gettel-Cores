@@ -122,7 +122,52 @@ p1_dirs["parent_CAN"]= ""
 
 all_companies = pd.concat([p1_cos, p2_cos], ignore_index=True)
 all_directors = pd.concat([p1_dirs, p2_dirs], ignore_index=True)
-print(f"  CORES: {len(all_companies)} companies, {len(all_directors)} director records")
+print(f"  CORES (raw): {len(all_companies)} companies, {len(all_directors)} director records")
+
+# ── 1A: DEDUPE ───────────────────────────────────────────────────────────────
+# The scraper re-visits companies across runs/phases and re-appends rows, so the
+# same CAN (and the same director) can show up several times. Most repeats are
+# byte-for-byte identical, but a few are the same company/director scraped at
+# different points in time (a new annual return filed, a status change, a
+# parent_CAN only found once the deep crawl ran). We keep one row per key,
+# preferring the most complete / most recently-filed version rather than just
+# the first one seen, so we don't silently regress a status or drop a
+# parent_CAN link that a later scrape picked up.
+
+def _completeness(df, ignore_cols=()):
+    """Count of non-null, non-empty-string fields per row (higher = richer record)."""
+    scored = df.drop(columns=[c for c in ignore_cols if c in df.columns])
+    return scored.apply(lambda col: col.notna() & (col.astype(str).str.strip() != ""), axis=0).sum(axis=1)
+
+def dedupe_companies(df):
+    df = df.copy()
+    ar_year = pd.to_numeric(df.get("Last_AR_Year"), errors="coerce").fillna(-1)
+    completeness = _completeness(df, ignore_cols=["CAN"])
+    df = (df.assign(_ar_year=ar_year, _completeness=completeness)
+            .sort_values(["_ar_year", "_completeness"], ascending=[False, False])
+            .drop(columns=["_ar_year", "_completeness"]))
+    before = len(df)
+    df = df.drop_duplicates(subset=["CAN"], keep="first").reset_index(drop=True)
+    print(f"  Deduped companies: {before} -> {len(df)} ({before - len(df)} duplicate rows removed)")
+    return df
+
+def dedupe_directors(df):
+    # Appointment_Date is part of the key: a person can resign and be
+    # reappointed later, which is two legitimate records, not a duplicate.
+    key_cols = ["CAN", "Last_Name", "First_Name", "Type", "Appointment_Date"]
+    df = df.copy()
+    completeness = _completeness(df, ignore_cols=key_cols)
+    df = (df.assign(_completeness=completeness)
+            .sort_values("_completeness", ascending=False)
+            .drop(columns=["_completeness"]))
+    before = len(df)
+    df = df.drop_duplicates(subset=key_cols, keep="first").reset_index(drop=True)
+    print(f"  Deduped directors: {before} -> {len(df)} ({before - len(df)} duplicate rows removed)")
+    return df
+
+all_companies = dedupe_companies(all_companies)
+all_directors = dedupe_directors(all_directors)
+print(f"  CORES (deduped): {len(all_companies)} companies, {len(all_directors)} director records")
 
 # ── 1A: NORMALIZE ────────────────────────────────────────────────────────────
 
