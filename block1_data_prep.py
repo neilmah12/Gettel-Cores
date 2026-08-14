@@ -1,5 +1,5 @@
 # @title 1 — DATA INGESTION & ENTITY RESOLUTION
-# Inputs: Gettel .xlsx + 4 CORES CSVs
+# Inputs: Gettel .xlsx + any number of CORES companies/directors CSV batches
 # Outputs: graph_data.json, dashboard_data.json, gettel_scrape_list.csv, gettel_transactions_parsed.csv
 
 import pandas as pd
@@ -13,35 +13,23 @@ import openpyxl
 from google.colab import files
 
 # ── 1A: UPLOAD FILES ─────────────────────────────────────────────────────────
+# Upload the Gettel .xlsx plus ALL of your CORES scrape batches at once — any
+# number of "*companies*.csv" / "*directors*.csv" pairs (original scrape,
+# "deep" phase, and any later re-scrape rounds). They're all merged and
+# deduped together below, so you don't need to track which batch is which.
 
 print("=" * 60)
-print("UPLOAD REQUIRED — 5 files total")
+print("UPLOAD REQUIRED — Gettel .xlsx + all CORES companies/directors CSVs")
 print("=" * 60)
 print()
-print("Please upload the following files when prompted:")
-print()
-print("  1. Gettel Excel (the transaction database):")
-print("     → 2026_02_19_Gettel_Sales_2018-2026_-with_links.xlsx")
-print()
-print("  2. CORES Phase 1 companies CSV:")
-print("     → cores_companies_[timestamp].csv")
-print()
-print("  3. CORES Phase 1 directors CSV:")
-print("     → cores_directors_[timestamp].csv")
-print()
-print("  4. CORES Phase 2 (deep) companies CSV:")
-print("     → cores_companies_deep_[timestamp].csv")
-print()
-print("  5. CORES Phase 2 (deep) directors CSV:")
-print("     → cores_directors_deep_[timestamp].csv")
-print()
-print("Select all 5 at once in the file picker (Ctrl+click / Cmd+click).")
+print("Select the Gettel .xlsx AND every cores_companies*.csv /")
+print("cores_directors*.csv batch you have (Ctrl+click / Cmd+click).")
 print("=" * 60)
 
 uploaded = files.upload()
 
 if not uploaded:
-    raise RuntimeError("No files uploaded. Re-run this cell and upload all 5 files.")
+    raise RuntimeError("No files uploaded. Re-run this cell and upload your files.")
 
 uploaded_names = list(uploaded.keys())
 print(f"\nUploaded {len(uploaded_names)} file(s):")
@@ -50,79 +38,103 @@ for n in uploaded_names:
 
 # ── Match uploaded files by pattern ──────────────────────────────────────────
 
-def find_file(pattern_keywords, uploaded_names, require=True):
-    for name in uploaded_names:
-        lower = name.lower()
-        if all(kw in lower for kw in pattern_keywords):
-            return name
-    if require:
-        raise FileNotFoundError(
-            f"Could not find a file matching keywords {pattern_keywords} "
-            f"among uploaded files: {uploaded_names}\n"
-            f"Please re-run the cell and upload all 5 required files."
-        )
-    return None
-
-gettel_file = find_file(['.xlsx'], uploaded_names)
-p1_cos_file  = find_file(['companies', 'deep'], uploaded_names, require=False)
-p1_dirs_file = find_file(['directors', 'deep'], uploaded_names, require=False)
-# Phase 1 files must NOT contain 'deep'
-p1_cos_file  = next((n for n in uploaded_names if 'companies' in n.lower() and 'deep' not in n.lower()), None)
-p1_dirs_file = next((n for n in uploaded_names if 'directors' in n.lower() and 'deep' not in n.lower()), None)
-p2_cos_file  = next((n for n in uploaded_names if 'companies' in n.lower() and 'deep' in n.lower()), None)
-p2_dirs_file = next((n for n in uploaded_names if 'directors' in n.lower() and 'deep' in n.lower()), None)
+gettel_file    = next((n for n in uploaded_names if n.lower().endswith('.xlsx')), None)
+company_files  = [n for n in uploaded_names if 'companies' in n.lower()]
+director_files = [n for n in uploaded_names if 'directors' in n.lower()]
 
 missing = []
-if not gettel_file:  missing.append("Gettel .xlsx")
-if not p1_cos_file:  missing.append("cores_companies (Phase 1, no 'deep' in name)")
-if not p1_dirs_file: missing.append("cores_directors (Phase 1, no 'deep' in name)")
-if not p2_cos_file:  missing.append("cores_companies_deep (Phase 2)")
-if not p2_dirs_file: missing.append("cores_directors_deep (Phase 2)")
+if not gettel_file:     missing.append("Gettel .xlsx")
+if not company_files:   missing.append("cores_companies*.csv (at least one batch)")
+if not director_files:  missing.append("cores_directors*.csv (at least one batch)")
 
 if missing:
     raise FileNotFoundError(
         f"\nMissing files — could not identify:\n" +
         "\n".join(f"  - {m}" for m in missing) +
         f"\n\nUploaded: {uploaded_names}\n"
-        f"Re-run the cell and upload all 5 files with the correct names."
+        f"Re-run the cell and upload the Gettel .xlsx plus your CORES CSV batches."
     )
 
 print(f"\nFile mapping:")
-print(f"  Gettel      → {gettel_file}")
-print(f"  P1 Companies→ {p1_cos_file}")
-print(f"  P1 Directors→ {p1_dirs_file}")
-print(f"  P2 Companies→ {p2_cos_file}")
-print(f"  P2 Directors→ {p2_dirs_file}")
+print(f"  Gettel              → {gettel_file}")
+print(f"  Company CSV batches → {len(company_files)}: {company_files}")
+print(f"  Director CSV batches→ {len(director_files)}: {director_files}")
+
+# Known Gettel-name typos that will never string-match their real CORES name
+# (usually OCR misreads from the source PDFs). Add entries here as you find
+# them: normalized Gettel entity name -> normalized CORES Legal_Name.
+GETTEL_NAME_ALIASES = {
+    "BLT PROPERTY RENTAL INC": "LTD PROPERTY RENTALS INC",
+}
 
 # ── 1A: LOAD SOURCES ─────────────────────────────────────────────────────────
 
 print("\nLoading Gettel...")
 wb = openpyxl.load_workbook(io.BytesIO(uploaded[gettel_file]), data_only=True)
-
-# Auto-detect sheet name — falls back to first sheet if Sheet5 not found
-sheet_name = "Sheet5" if "Sheet5" in wb.sheetnames else wb.sheetnames[0]
-if sheet_name != "Sheet5":
-    print(f"  Note: 'Sheet5' not found — using sheet '{sheet_name}'")
-ws = wb[sheet_name]
+ws = wb[wb.sheetnames[0]]
 rows = list(ws.iter_rows(values_only=True))
 gettel_headers = rows[0]
-gettel_raw = pd.DataFrame(rows[1:], columns=gettel_headers)
-print(f"  Gettel: {len(gettel_raw)} rows, {len(gettel_raw.columns)} cols")
+_hidx = {h: i for i, h in enumerate(gettel_headers)}
+
+# Column names vary between Gettel export versions (e.g. "Sale Year" vs
+# "Year Sold", or a raw single "Vendor"/"Purchaser" field vs. pre-split
+# "Vendor Company"/"Vendor Director" columns). Look up by name with
+# fallbacks instead of hardcoded positions so both layouts work, and so a
+# reordered/renamed column doesn't silently read the wrong field.
+GETTEL_COLMAP = {
+    'prop_id':            ['Prop ID'],
+    'property_class':     ['Property Class'],
+    'property_type':      ['Property Type'],
+    'ownership_type':     ['Ownership Type'],
+    'description':        ['Description'],
+    'land_use':           ['Land Use Class'],
+    'address':            ['Address'],
+    'city':                ['City'],
+    'vendor_raw':         ['Vendor'],
+    'purchaser_raw':      ['Purchaser'],
+    'vendor_company':     ['Vendor Company'],
+    'vendor_director':    ['Vendor Director'],
+    'purchaser_company':  ['Purchaser Company'],
+    'purchaser_director': ['Purchaser Director'],
+    'legal_description':  ['Legal Description'],
+    'subdivision':        ['Subdivision'],
+    'site_area':          ['Site Area'],
+    'site_units':         ['Site Units'],
+    'bldg_area':          ['Bldg Area'],
+    'bldg_units':         ['Bldg Units'],
+    'sale_price':         ['Sale Price'],
+    'sale_date':          ['Sale Date'],
+    'sale_year':          ['Year Sold', 'Sale Year'],
+    'unit_price':         ['Unit Price'],
+    'unit_measure':       ['Unit Price Measure'],
+    'year_built':         ['Year Built'],
+}
+
+def gv(row, field):
+    for name in GETTEL_COLMAP.get(field, []):
+        i = _hidx.get(name)
+        if i is not None and row[i] is not None:
+            return row[i]
+    return None
+
+# Drop fully-blank padding rows some exports leave at the bottom of the sheet
+data_rows = [r for r in rows[1:] if gv(r, "property_class") is not None]
+gettel_raw = pd.DataFrame(data_rows, columns=gettel_headers)
+print(f"  Gettel: {len(gettel_raw)} real rows (of {len(rows)-1} total, blanks dropped), {len(gettel_raw.columns)} cols")
 
 print("Loading CORES...")
-p1_cos  = pd.read_csv(io.BytesIO(uploaded[p1_cos_file]),  dtype=str)
-p1_dirs = pd.read_csv(io.BytesIO(uploaded[p1_dirs_file]), dtype=str)
-p2_cos  = pd.read_csv(io.BytesIO(uploaded[p2_cos_file]),  dtype=str)
-p2_dirs = pd.read_csv(io.BytesIO(uploaded[p2_dirs_file]), dtype=str)
 
-p1_cos["depth"]      = "1"
-p1_cos["parent_CAN"] = ""
-p1_dirs["depth"]     = "1"
-p1_dirs["parent_CAN"]= ""
+def _load_cores_batch(name):
+    df = pd.read_csv(io.BytesIO(uploaded[name]), dtype=str)
+    if "depth" not in df.columns:
+        df["depth"] = "1"
+        df["parent_CAN"] = ""
+    return df
 
-all_companies = pd.concat([p1_cos, p2_cos], ignore_index=True)
-all_directors = pd.concat([p1_dirs, p2_dirs], ignore_index=True)
-print(f"  CORES (raw): {len(all_companies)} companies, {len(all_directors)} director records")
+all_companies = pd.concat([_load_cores_batch(n) for n in company_files], ignore_index=True)
+all_directors = pd.concat([_load_cores_batch(n) for n in director_files], ignore_index=True)
+print(f"  CORES (raw, {len(company_files)} company batch(es) + {len(director_files)} director batch(es)): "
+      f"{len(all_companies)} companies, {len(all_directors)} director records")
 
 # ── 1A: DEDUPE ───────────────────────────────────────────────────────────────
 # The scraper re-visits companies across runs/phases and re-appends rows, so the
@@ -282,91 +294,81 @@ def is_address_line(line):
         return True
     return False
 
-gettel_cols = list(gettel_raw.columns)
-
-def get_col(row, idx):
-    try:
-        return row.iloc[idx]
-    except:
-        return None
+def apply_presplit_override(parsed, company_val, person_val):
+    # Some Gettel export versions flatten the vendor/purchaser text onto a
+    # single line (no embedded newlines), which breaks parse_party's
+    # line-splitting above and pollutes "entity" with the director's name
+    # and address glued on. Those exports also carry pre-split Vendor/
+    # Purchaser Company + Director columns built separately from the raw
+    # text — prefer those for entity/person whenever present, and keep
+    # parse_party's role/address (which degrade to "" rather than garbage
+    # on the flattened rows, since len(lines) == 1 short-circuits them).
+    company = str(company_val or '').strip()
+    person  = str(person_val or '').strip()
+    if company:
+        parsed = dict(parsed)
+        parsed["entity"] = company
+        parsed["entity_type"] = detect_entity_type(company)
+        parsed["is_et_al"] = bool(ET_AL_RE.search(company))
+    if person:
+        parsed = dict(parsed)
+        parsed["person"] = person
+    return parsed
 
 print("Parsing Gettel vendor/purchaser fields...")
 records = []
 for i, row in gettel_raw.iterrows():
-    vp = parse_party(get_col(row, 11))
-    pp = parse_party(get_col(row, 12))
+    r = row.values
+    vp = apply_presplit_override(parse_party(gv(r, "vendor_raw")), gv(r, "vendor_company"), gv(r, "vendor_director"))
+    pp = apply_presplit_override(parse_party(gv(r, "purchaser_raw")), gv(r, "purchaser_company"), gv(r, "purchaser_director"))
 
-    sale_price = get_col(row, 19)
-    try:
-        sale_price = float(sale_price) if sale_price else None
-    except:
-        sale_price = None
+    def as_float(v):
+        try: return float(v) if v not in (None, "") else None
+        except: return None
+    def as_int(v):
+        try: return int(v) if v not in (None, "") else None
+        except: return None
 
-    sale_date = get_col(row, 20)
+    sale_price = as_float(gv(r, "sale_price"))
+    sale_date  = gv(r, "sale_date")
     sale_date_str = sale_date.strftime('%Y-%m-%d') if hasattr(sale_date, 'strftime') else str(sale_date or '')
-
-    sale_year = get_col(row, 21)
-    try:
-        sale_year = int(sale_year) if sale_year else None
-    except:
-        sale_year = None
-
-    unit_price = get_col(row, 22)
-    try:
-        unit_price = float(unit_price) if unit_price else None
-    except:
-        unit_price = None
-
-    site_area = get_col(row, 15)
-    try:
-        site_area = float(site_area) if site_area else None
-    except:
-        site_area = None
-
-    bldg_area = get_col(row, 17)
-    try:
-        bldg_area = float(bldg_area) if bldg_area else None
-    except:
-        bldg_area = None
-
-    year_built = get_col(row, 25)
-    try:
-        year_built = int(year_built) if year_built else None
-    except:
-        year_built = None
-
-    ownership_type = str(get_col(row, 6) or '').strip().title()
+    sale_year  = as_int(gv(r, "sale_year"))
+    unit_price = as_float(gv(r, "unit_price"))
+    site_area  = as_float(gv(r, "site_area"))
+    bldg_area  = as_float(gv(r, "bldg_area"))
+    year_built = as_int(gv(r, "year_built"))
+    ownership_type = str(gv(r, "ownership_type") or '').strip().title()
 
     records.append({
         "txn_id":             i,
-        "prop_id":            str(get_col(row, 3) or ''),
-        "property_class":     str(get_col(row, 4) or ''),
-        "property_type":      str(get_col(row, 5) or ''),
+        "prop_id":            str(gv(r, "prop_id") or ''),
+        "property_class":     str(gv(r, "property_class") or ''),
+        "property_type":      str(gv(r, "property_type") or ''),
         "ownership_type":     ownership_type,
-        "description":        str(get_col(row, 7) or ''),
-        "land_use":           str(get_col(row, 8) or ''),
-        "address":            str(get_col(row, 9) or ''),
-        "city":               str(get_col(row, 10) or ''),
-        "legal_description":  str(get_col(row, 13) or ''),
-        "subdivision":        str(get_col(row, 14) or ''),
+        "description":        str(gv(r, "description") or ''),
+        "land_use":           str(gv(r, "land_use") or ''),
+        "address":            str(gv(r, "address") or ''),
+        "city":               str(gv(r, "city") or ''),
+        "legal_description":  str(gv(r, "legal_description") or ''),
+        "subdivision":        str(gv(r, "subdivision") or ''),
         "site_area":          site_area,
-        "site_units":         str(get_col(row, 16) or ''),
+        "site_units":         str(gv(r, "site_units") or ''),
         "bldg_area":          bldg_area,
-        "bldg_units":         str(get_col(row, 18) or ''),
+        "bldg_units":         str(gv(r, "bldg_units") or ''),
         "sale_price":         sale_price,
         "sale_date":          sale_date_str,
         "sale_year":          sale_year,
         "unit_price":         unit_price,
-        "unit_measure":       str(get_col(row, 23) or ''),
+        "unit_measure":       str(gv(r, "unit_measure") or ''),
         "year_built":         year_built,
-        "vendor_raw":         str(get_col(row, 11) or ''),
+        "vendor_raw":         str(gv(r, "vendor_raw") or ''),
         "vendor_entity":      vp["entity"],
         "vendor_entity_type": vp["entity_type"],
         "vendor_person":      vp["person"],
         "vendor_role":        vp["role"],
         "vendor_address":     vp["address"],
         "vendor_is_et_al":    vp["is_et_al"],
-        "purchaser_raw":      str(get_col(row, 12) or ''),
+        "purchaser_raw":      str(gv(r, "purchaser_raw") or ''),
         "purchaser_entity":   pp["entity"],
         "purchaser_entity_type": pp["entity_type"],
         "purchaser_person":   pp["person"],
@@ -400,6 +402,10 @@ def match_company(name):
     alt2 = norm.rstrip('.')
     if alt2 in cores_can_lookup:
         return cores_can_lookup[alt2], "normalized"
+    if norm in GETTEL_NAME_ALIASES:
+        aliased = GETTEL_NAME_ALIASES[norm]
+        if aliased in cores_can_lookup:
+            return cores_can_lookup[aliased], "aliased"
     return "", "unmatched"
 
 vendor_cans    = {}
