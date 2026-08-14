@@ -7,32 +7,56 @@ import json
 import re
 import io
 import os
+import sys
+import glob
 from datetime import datetime
 from collections import defaultdict
 import openpyxl
-from google.colab import files
 
-# ── 1A: UPLOAD FILES ─────────────────────────────────────────────────────────
+try:
+    from google.colab import files
+    IN_COLAB = True
+except ImportError:
+    IN_COLAB = False
+
+# ── 1A: LOAD FILES ───────────────────────────────────────────────────────────
 # Upload the Gettel .xlsx plus ALL of your CORES scrape batches at once — any
 # number of "*companies*.csv" / "*directors*.csv" pairs (original scrape,
 # "deep" phase, and any later re-scrape rounds). They're all merged and
 # deduped together below, so you don't need to track which batch is which.
+#
+# Two ways to run this:
+#   - In Colab: paste into a cell and run it — the file picker below opens.
+#   - Locally: `python block1_data_prep.py <input_dir>` — every .xlsx/.csv in
+#     <input_dir> (default: current directory) is picked up the same way,
+#     matched by the same filename patterns, no upload dialog involved.
 
-print("=" * 60)
-print("UPLOAD REQUIRED — Gettel .xlsx + all CORES companies/directors CSVs")
-print("=" * 60)
-print()
-print("Select the Gettel .xlsx AND every cores_companies*.csv /")
-print("cores_directors*.csv batch you have (Ctrl+click / Cmd+click).")
-print("=" * 60)
+if IN_COLAB:
+    print("=" * 60)
+    print("UPLOAD REQUIRED — Gettel .xlsx + all CORES companies/directors CSVs")
+    print("=" * 60)
+    print()
+    print("Select the Gettel .xlsx AND every cores_companies*.csv /")
+    print("cores_directors*.csv batch you have (Ctrl+click / Cmd+click).")
+    print("=" * 60)
 
-uploaded = files.upload()
+    uploaded = files.upload()
+    if not uploaded:
+        raise RuntimeError("No files uploaded. Re-run this cell and upload your files.")
+    uploaded_names = list(uploaded.keys())
+    read_bytes = lambda name: uploaded[name]
+else:
+    input_dir = sys.argv[1] if len(sys.argv) > 1 else "."
+    found = sorted(glob.glob(os.path.join(input_dir, "*.xlsx")) + glob.glob(os.path.join(input_dir, "*.csv")))
+    if not found:
+        raise RuntimeError(f"No .xlsx/.csv files found in '{input_dir}'. "
+                            f"Pass the folder containing the Gettel .xlsx and CORES CSVs as an argument.")
+    uploaded_names = [os.path.basename(p) for p in found]
+    _paths = {os.path.basename(p): p for p in found}
+    read_bytes = lambda name: open(_paths[name], "rb").read()
+    print(f"Reading from local directory: {os.path.abspath(input_dir)}")
 
-if not uploaded:
-    raise RuntimeError("No files uploaded. Re-run this cell and upload your files.")
-
-uploaded_names = list(uploaded.keys())
-print(f"\nUploaded {len(uploaded_names)} file(s):")
+print(f"\nFound {len(uploaded_names)} file(s):")
 for n in uploaded_names:
     print(f"  {n}")
 
@@ -48,11 +72,12 @@ if not company_files:   missing.append("cores_companies*.csv (at least one batch
 if not director_files:  missing.append("cores_directors*.csv (at least one batch)")
 
 if missing:
+    where = "Re-run the cell and upload" if IN_COLAB else "Add to the input directory"
     raise FileNotFoundError(
         f"\nMissing files — could not identify:\n" +
         "\n".join(f"  - {m}" for m in missing) +
-        f"\n\nUploaded: {uploaded_names}\n"
-        f"Re-run the cell and upload the Gettel .xlsx plus your CORES CSV batches."
+        f"\n\nFound: {uploaded_names}\n"
+        f"{where} the Gettel .xlsx plus your CORES CSV batches."
     )
 
 print(f"\nFile mapping:")
@@ -70,7 +95,7 @@ GETTEL_NAME_ALIASES = {
 # ── 1A: LOAD SOURCES ─────────────────────────────────────────────────────────
 
 print("\nLoading Gettel...")
-wb = openpyxl.load_workbook(io.BytesIO(uploaded[gettel_file]), data_only=True)
+wb = openpyxl.load_workbook(io.BytesIO(read_bytes(gettel_file)), data_only=True)
 ws = wb[wb.sheetnames[0]]
 rows = list(ws.iter_rows(values_only=True))
 gettel_headers = rows[0]
@@ -134,7 +159,7 @@ print(f"  Gettel: {len(gettel_raw)} real rows (of {len(rows)-1} total, blanks dr
 print("Loading CORES...")
 
 def _load_cores_batch(name):
-    df = pd.read_csv(io.BytesIO(uploaded[name]), dtype=str)
+    df = pd.read_csv(io.BytesIO(read_bytes(name)), dtype=str)
     if "depth" not in df.columns:
         df["depth"] = "1"
         df["parent_CAN"] = ""
