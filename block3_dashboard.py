@@ -203,6 +203,15 @@ html = r"""
       </details>
 
       <details class="db-fgroup">
+        <summary>Building Form</summary>
+        <div class="db-fgroup-body">
+          <input class="db-cb-search" data-for="db-f-bldgform" placeholder="Search…">
+          <div class="db-cb-actions"><a onclick="DB_selectAll('db-f-bldgform',true)">All</a><a onclick="DB_selectAll('db-f-bldgform',false)">None</a></div>
+          <div class="db-cb-group" id="db-f-bldgform"></div>
+        </div>
+      </details>
+
+      <details class="db-fgroup">
         <summary>City</summary>
         <div class="db-fgroup-body">
           <select class="db-select" id="db-f-city"><option value="">All Cities</option></select>
@@ -330,6 +339,7 @@ html = r"""
             <div class="db-seg" id="db-year-mode">
               <button class="active" data-mode="volume" onclick="DB_setYearMode('volume')">$ Volume</button>
               <button data-mode="door" onclick="DB_setYearMode('door')">$/Door</button>
+              <button data-mode="caprate" onclick="DB_setYearMode('caprate')">Cap Rate</button>
             </div>
           </div>
           <div class="db-chart-wrap"><canvas id="db-chart-year"></canvas></div>
@@ -350,7 +360,8 @@ html = r"""
             <div class="db-pf-stats">
               <div class="db-pf-stat"><div class="v" id="db-pf-held">—</div><div class="l">Currently Held</div></div>
               <div class="db-pf-stat"><div class="v" id="db-pf-vol">—</div><div class="l">Purchase Volume</div></div>
-              <div class="db-pf-stat"><div class="v" id="db-pf-hold">—</div><div class="l">Avg Hold (resold)</div></div>
+              <div class="db-pf-stat"><div class="v" id="db-pf-age">—</div><div class="l">Avg Holding Age (open)</div></div>
+              <div class="db-pf-stat"><div class="v" id="db-pf-hold">—</div><div class="l">Avg Realized Hold (flipped)</div></div>
             </div>
             <div class="db-pf-list" id="db-pf-list"></div>
             <div class="db-pf-note">Ownership inferred from purchase records with no later transaction at the same legal description. A condo conversion / de-condo changes the legal description and will break this chain.</div>
@@ -444,6 +455,16 @@ function fmtPrice(v){
 function fmtArea(v,u){return v?(parseFloat(v)||0).toLocaleString()+' '+(u||''):'—';}
 function fmtPct(v){return (v==null||isNaN(v))?'—':(parseFloat(v).toFixed(2)+'%');}
 
+// Adaptive duration formatter: "0.1 yr" for a 25-day flip reads as "basically
+// zero," obscuring that it's actually a fast ~1-month turnaround. Pick the
+// unit the magnitude actually calls for instead of always forcing years.
+function fmtDuration(days){
+  if(days==null || isNaN(days)) return '—';
+  if(days < 60) return `${Math.round(days)} day${Math.round(days)===1?'':'s'}`;
+  if(days < 730) return `${(days/30.44).toFixed(1)} mo`;
+  return `${(days/365).toFixed(1)} yr`;
+}
+
 // ─── LEGAL-DESCRIPTION RESALE INDEX (for portfolio matching) ──────────────────
 function normalizeLegal(s){
   return (s||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
@@ -487,6 +508,7 @@ function buildCBGroup(containerId, options, onChange){
 
 buildCBGroup('db-f-type',    FOPTS.property_types,   DB_applyFilters);
 buildCBGroup('db-f-landuse', FOPTS.land_use_classes,  DB_applyFilters);
+buildCBGroup('db-f-bldgform', FOPTS.building_forms,   DB_applyFilters);
 
 document.querySelectorAll('.db-cb-search').forEach(inp=>{
   inp.addEventListener('input', ()=>{
@@ -540,6 +562,7 @@ function rangeVal(id){ const v = document.getElementById(id).value; return v==='
 function DB_applyFilters(){
   const types    = getChecked('db-f-type');
   const landUse  = getChecked('db-f-landuse');
+  const bldgForm = getChecked('db-f-bldgform');
   const city     = document.getElementById('db-f-city').value;
   const subdiv   = document.getElementById('db-f-subdiv').value;
   const yFrom    = rangeVal('db-f-year-from'), yTo = rangeVal('db-f-year-to');
@@ -565,6 +588,7 @@ function DB_applyFilters(){
   DB_filtered = TXNS.filter(t=>{
     if(!types.includes(t.property_type))   return false;
     if(landUse.length && t.land_use && !landUse.includes(t.land_use)) return false;
+    if(bldgForm.length && t.description && !bldgForm.includes(t.description)) return false;
     if(city   && t.city !== city)           return false;
     if(subdiv && t.subdivision !== subdiv)  return false;
     const yr = parseInt(t.sale_year)||0;
@@ -649,8 +673,26 @@ window.DB_setYearMode = function(mode){
   updateYearChart();
 };
 
+// One measure per axis, always — a cap-rate line laid over the $-volume
+// bars on a second y-axis would let two unrelated scales visually "line up"
+// regardless of whether they actually relate. Volume, $/Door, and Cap Rate
+// stay three modes of one single-axis chart instead of one chart with two
+// scales.
+function avgByYear(field, {positiveOnly}={}){
+  const byYear = {};
+  DB_filtered.forEach(t=>{
+    const v = parseFloat(t[field]);
+    if(isNaN(v) || (positiveOnly && v<=0)) return;
+    const y = t.sale_year||'Unknown';
+    (byYear[y] = byYear[y]||[]).push(v);
+  });
+  const years = Object.keys(byYear).sort();
+  const data  = years.map(y=>{ const arr=byYear[y]; return arr.reduce((s,v)=>s+v,0)/arr.length; });
+  return {years, data};
+}
+
 function updateYearChart(){
-  let years, data, label, fmt;
+  let years, data, label, fmt, type;
   if(DB_year_mode==='volume'){
     const byYear = {};
     DB_filtered.forEach(t=>{
@@ -661,21 +703,22 @@ function updateYearChart(){
     data  = years.map(y=>byYear[y]);
     label = 'Total $ Volume';
     fmt   = fmtPrice;
-  } else {
-    const byYear = {};
-    DB_filtered.forEach(t=>{
-      const dp = parseFloat(t.price_per_door);
-      if(isNaN(dp) || dp<=0) return;
-      const y = t.sale_year||'Unknown';
-      (byYear[y] = byYear[y]||[]).push(dp);
-    });
-    years = Object.keys(byYear).sort();
-    data  = years.map(y=>{ const arr=byYear[y]; return arr.reduce((s,v)=>s+v,0)/arr.length; });
+    type  = 'bar';
+  } else if(DB_year_mode==='door'){
+    ({years, data} = avgByYear('price_per_door', {positiveOnly:true}));
     label = 'Avg $/Door';
     fmt   = fmtPrice;
+    type  = 'line';
+  } else {
+    ({years, data} = avgByYear('cap_rate', {positiveOnly:true}));
+    label = 'Avg Cap Rate';
+    fmt   = fmtPct;
+    type  = 'line';
   }
 
-  const dataset = {label, data, backgroundColor: ACCENT, borderRadius:3};
+  const dataset = type==='line'
+    ? {label, data, borderColor: ACCENT, backgroundColor: ACCENT, pointRadius:3, pointHoverRadius:5, tension:0.15, fill:false}
+    : {label, data, backgroundColor: ACCENT, borderRadius:3};
 
   // Destroy + recreate rather than mutate the existing instance's data/labels
   // in place: Chart.js's category-scale tick cache doesn't reliably stay in
@@ -684,7 +727,7 @@ function updateYearChart(){
   // renders), which is a correctness bug, not just a redraw cost.
   if(DB_charts.year) DB_charts.year.destroy();
   DB_charts.year = new Chart(document.getElementById('db-chart-year'),{
-    type:'bar',
+    type,
     data:{labels:years, datasets:[dataset]},
     options:{responsive:true,maintainAspectRatio:false,
       plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>`${label}: ${fmt(ctx.raw)}`}}},
@@ -772,16 +815,27 @@ window.DB_showPortfolio = function(name, kind){
   document.getElementById('db-pf-held').textContent = held.length.toLocaleString();
   document.getElementById('db-pf-vol').textContent   = fmtPrice(totalVol);
 
-  if(resold.length){
-    const days = resold.map(r=>{
-      const d1 = new Date(r.purchase.sale_date), d2 = new Date(r.resale.sale_date);
-      return (d2-d1)/(1000*60*60*24);
-    }).filter(d=>!isNaN(d)&&d>=0);
-    const avgDays = days.length ? days.reduce((s,v)=>s+v,0)/days.length : null;
-    document.getElementById('db-pf-hold').textContent = avgDays!=null ? `${(avgDays/365).toFixed(1)} yr` : '—';
-  } else {
-    document.getElementById('db-pf-hold').textContent = '—';
-  }
+  // Two distinct metrics, not one blended average: a still-held property's
+  // clock hasn't stopped, so it can't be averaged into a "hold period" the
+  // same way a completed buy-sell cycle can. Collapsing both into a single
+  // number (as before) let a single old flip make a long-term holder look
+  // like a fast-churner.
+  const now = Date.now();
+  const ageDays = held.map(t=>{
+    const d = new Date(t.sale_date);
+    return isNaN(d) ? NaN : (now - d)/(1000*60*60*24);
+  }).filter(d=>!isNaN(d) && d>=0);
+  const avgAge = ageDays.length ? ageDays.reduce((s,v)=>s+v,0)/ageDays.length : null;
+  document.getElementById('db-pf-age').textContent =
+    avgAge!=null ? `${fmtDuration(avgAge)} (n=${ageDays.length})` : '—';
+
+  const holdDays = resold.map(r=>{
+    const d1 = new Date(r.purchase.sale_date), d2 = new Date(r.resale.sale_date);
+    return (isNaN(d1)||isNaN(d2)) ? NaN : (d2-d1)/(1000*60*60*24);
+  }).filter(d=>!isNaN(d) && d>=0);
+  const avgHold = holdDays.length ? holdDays.reduce((s,v)=>s+v,0)/holdDays.length : null;
+  document.getElementById('db-pf-hold').textContent =
+    avgHold!=null ? `${fmtDuration(avgHold)} (n=${holdDays.length})` : '— (n=0)';
 
   const list = document.getElementById('db-pf-list');
   list.innerHTML = '';
@@ -897,7 +951,7 @@ window.DB_page = function(dir){
 };
 
 window.DB_resetAll = function(){
-  document.querySelectorAll('#db-f-type input, #db-f-landuse input').forEach(el=>el.checked=true);
+  document.querySelectorAll('#db-f-type input, #db-f-landuse input, #db-f-bldgform input').forEach(el=>el.checked=true);
   document.querySelectorAll('.db-cb-search').forEach(el=>el.value='');
   document.querySelectorAll('.db-cb-label').forEach(el=>el.classList.remove('db-hide'));
   ['db-f-city','db-f-subdiv'].forEach(id=>document.getElementById(id).value='');

@@ -821,6 +821,7 @@ dashboard_data = {
         "property_types":   sorted(gettel_txns["property_type"].dropna().unique().tolist()),
         "ownership_types":  sorted(gettel_txns["ownership_type"].dropna().unique().tolist()),
         "land_use_classes": sorted([v for v in gettel_txns["land_use"].dropna().unique().tolist() if v]),
+        "building_forms":   sorted([v for v in gettel_txns["description"].dropna().unique().tolist() if v]),
         "cities":           sorted(gettel_txns["city"].dropna().unique().tolist()),
         "years":            sorted([int(y) for y in gettel_txns["sale_year"].dropna().unique() if y]),
         "subdivisions":     sorted(gettel_txns["subdivision"].dropna().unique().tolist()),
