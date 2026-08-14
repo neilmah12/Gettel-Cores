@@ -367,7 +367,7 @@ html = r"""
               <button data-mode="units" onclick="DB_setRankMode('cos','units')">Units</button>
             </div>
           </div>
-          <div class="db-chart-wrap" style="height:260px"><canvas id="db-chart-cos"></canvas></div>
+          <div class="db-chart-wrap" style="height:420px"><canvas id="db-chart-cos"></canvas></div>
         </div>
         <div class="db-chart-card">
           <div class="db-chart-card-head">
@@ -378,7 +378,7 @@ html = r"""
               <button data-mode="units" onclick="DB_setRankMode('ppl','units')">Units</button>
             </div>
           </div>
-          <div class="db-chart-wrap" style="height:260px"><canvas id="db-chart-people"></canvas></div>
+          <div class="db-chart-wrap" style="height:420px"><canvas id="db-chart-people"></canvas></div>
         </div>
       </div>
 
@@ -677,22 +677,20 @@ function updateYearChart(){
 
   const dataset = {label, data, backgroundColor: ACCENT, borderRadius:3};
 
-  if(DB_charts.year){
-    DB_charts.year.data.labels = years;
-    DB_charts.year.data.datasets = [dataset];
-    DB_charts.year.options.plugins.tooltip.callbacks.label = ctx=>`${label}: ${fmt(ctx.raw)}`;
-    DB_charts.year.options.scales.y.ticks.callback = v=>fmt(v);
-    DB_charts.year.update();
-  } else {
-    DB_charts.year = new Chart(document.getElementById('db-chart-year'),{
-      type:'bar',
-      data:{labels:years, datasets:[dataset]},
-      options:{responsive:true,maintainAspectRatio:false,
-        plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>`${label}: ${fmt(ctx.raw)}`}}},
-        scales:{x:{grid:{display:false},ticks:{color:TEXT_MUTED}},y:{ticks:{callback:v=>fmt(v),color:TEXT_MUTED},grid:{color:GRID_LINE}}},
-      }
-    });
-  }
+  // Destroy + recreate rather than mutate the existing instance's data/labels
+  // in place: Chart.js's category-scale tick cache doesn't reliably stay in
+  // sync with in-place label/data updates across repeated re-renders (the
+  // painted axis text can lag behind the actual data by one or more
+  // renders), which is a correctness bug, not just a redraw cost.
+  if(DB_charts.year) DB_charts.year.destroy();
+  DB_charts.year = new Chart(document.getElementById('db-chart-year'),{
+    type:'bar',
+    data:{labels:years, datasets:[dataset]},
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>`${label}: ${fmt(ctx.raw)}`}}},
+      scales:{x:{grid:{display:false},ticks:{color:TEXT_MUTED}},y:{ticks:{callback:v=>fmt(v),color:TEXT_MUTED},grid:{color:GRID_LINE}}},
+    }
+  });
 }
 
 function aggregateLeaderboard(field, mode){
@@ -735,30 +733,27 @@ function renderLeaderboard(chartKey, canvasId, field, mode, kind){
 
   DB_leaderboard_names[chartKey] = sorted.map(e=>e[0]);
 
-  const existing = DB_charts[chartKey];
-  if(existing){
-    existing.data.labels = labels;
-    existing.data.datasets[0].data = data;
-    existing.data.datasets[0].backgroundColor = colors;
-    existing.options.plugins.tooltip.callbacks.label = ctx=>fmtVal(ctx.raw);
-    existing.update();
-  } else {
-    DB_charts[chartKey] = new Chart(document.getElementById(canvasId),{
-      type:'bar',
-      data:{labels,datasets:[{data,backgroundColor:colors,borderWidth:0,borderRadius:2}]},
-      options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
-        plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>fmtVal(ctx.raw)}}},
-        scales:{x:{ticks:{callback:v=>mode==='volume'?fmtPrice(v):v,color:TEXT_MUTED},grid:{color:GRID_LINE}},y:{ticks:{font:{size:10},color:TEXT_MUTED},grid:{display:false}}},
-        onClick:(evt, els)=>{
-          if(!els.length) return;
-          const idx = els[0].index;
-          const name = DB_leaderboard_names[chartKey][idx];
-          DB_showPortfolio(name, kind);
-        },
-        onHover:(evt, els)=>{ evt.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
-      }
-    });
-  }
+  // Destroy + recreate (see updateYearChart for why): Chart.js's category
+  // scale can leave stale tick text painted on the axis after an in-place
+  // data/labels mutation + update(), even though the chart's own internal
+  // data.labels array is correct — a real, confirmed rendering bug, not a
+  // performance nicety being skipped.
+  if(DB_charts[chartKey]) DB_charts[chartKey].destroy();
+  DB_charts[chartKey] = new Chart(document.getElementById(canvasId),{
+    type:'bar',
+    data:{labels,datasets:[{data,backgroundColor:colors,borderWidth:0,borderRadius:2}]},
+    options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>fmtVal(ctx.raw)}}},
+      scales:{x:{ticks:{callback:v=>mode==='volume'?fmtPrice(v):v,color:TEXT_MUTED},grid:{color:GRID_LINE}},y:{ticks:{autoSkip:false,font:{size:10},color:TEXT_MUTED},grid:{display:false}}},
+      onClick:(evt, els)=>{
+        if(!els.length) return;
+        const idx = els[0].index;
+        const name = DB_leaderboard_names[chartKey][idx];
+        DB_showPortfolio(name, kind);
+      },
+      onHover:(evt, els)=>{ evt.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
+    }
+  });
 }
 
 function updateCosChart(){ renderLeaderboard('cos','db-chart-cos','entity', DB_rank_mode.cos, 'company'); }
