@@ -718,13 +718,22 @@ window.DB_setRankMode = function(chart, mode){
   if(chart==='cos') updateCosChart(); else updatePeopleChart();
 };
 
+// Full entity names for each leaderboard's currently-rendered bars, keyed by
+// chartKey. onClick reads from here (not a closure variable) so a click
+// always resolves against whatever is on screen *right now* — a closured
+// array would go stale the moment the chart re-renders on a filter change
+// or rank-mode toggle, since Chart.js updates are done in-place without
+// re-registering onClick, silently mapping bar index -> the wrong entity.
+const DB_leaderboard_names = {};
+
 function renderLeaderboard(chartKey, canvasId, field, mode, kind){
   const sorted = aggregateLeaderboard(field, mode);
   const labels = sorted.map(e=>e[0].length>30?e[0].slice(0,28)+'…':e[0]);
-  const fullNames = sorted.map(e=>e[0]);
   const data   = sorted.map(e=>e[1][mode]);
   const colors = sorted.map(e=>e[1].matched?ACCENT:MUTED_GREY);
   const fmtVal = mode==='volume' ? fmtPrice : (v=>v.toLocaleString());
+
+  DB_leaderboard_names[chartKey] = sorted.map(e=>e[0]);
 
   const existing = DB_charts[chartKey];
   if(existing){
@@ -743,7 +752,8 @@ function renderLeaderboard(chartKey, canvasId, field, mode, kind){
         onClick:(evt, els)=>{
           if(!els.length) return;
           const idx = els[0].index;
-          DB_showPortfolio(fullNames[idx], kind);
+          const name = DB_leaderboard_names[chartKey][idx];
+          DB_showPortfolio(name, kind);
         },
         onHover:(evt, els)=>{ evt.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
       }
