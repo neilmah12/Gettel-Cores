@@ -592,6 +592,12 @@ function DB_applyFilters(){
   updateKPIs();
   updateCharts();
   renderTable();
+  // Portfolio always reflects full transaction history (resale-chain
+  // detection needs to see purchases/resales outside the current filter
+  // window), so it can't just re-render against the new filtered set —
+  // clear it instead, since the selected entity may no longer be part of
+  // what's currently in view and leaving it up reads as stale/stuck data.
+  DB_closePortfolio();
 }
 window.DB_applyFilters = DB_applyFilters;
 
